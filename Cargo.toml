@@ -1,0 +1,37 @@
+[package]
+name = "dtokenz"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+
+[dependencies]
+anyhow = "1.0.71"
+async-trait = "0.1.88"
+axum = { version = "0.8", features = ["macros"] }
+axum-extra = { version = "0.10.1", features = ["typed-header"] }
+base64 = "0.22.1"
+chrono = { version = "0.4.38", features = ["now", "serde"] }
+dirs = "5.0.1"
+futures = "0.3.31"
+google-cloud-auth = "0.22.4"
+hex = "0.4.3"
+itertools = "0.12.1"
+jsonwebtoken = "9.3.0"
+reqwest = { version = "0.12.15", features = ["gzip", "brotli", "zstd", "json"] }
+scopeguard = "1.2.0"
+serde = "1"
+serde_derive = "1"
+serde_json = "1"
+sha2 = "0.10.9"
+tempfile = "3.10.1"
+thiserror = "1.0.60"
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7.15"
+tower-http = { version = "0.6", features = ["trace", "fs", "cors"] }
+tracing = "0.1"
+url = "2.5"
+webbrowser = "0.8"
+
+[dev-dependencies]
+axum-test = "17.3.0"
