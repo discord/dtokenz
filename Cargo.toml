@@ -3,6 +3,12 @@ name = "dtokenz"
 version = "0.1.0"
 edition = "2024"
 
+license = "MIT"
+description = "Rust library that makes fetching GCP tokens easier"
+documentation = "https://docs.rs/dtokenz"
+readme = "README.md"
+repository = "https://github.com/discord/dtokenz"
+
 [lib]
 
 [dependencies]
