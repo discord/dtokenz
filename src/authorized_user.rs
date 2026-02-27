@@ -4,28 +4,33 @@ use crate::application_default_credentials::{
 use crate::oauth_config::OAuthConfig;
 use crate::state::PersistedState;
 use crate::token_source::{
-    AccessTokenError, IdTokenError, TokenSource, fetch_id_token_from_google,
-    fetch_token_from_google_sdk,
+    AccessTokenError, GoogleOAuthErrorResponse, IdTokenError, TokenSource,
+    fetch_id_token_from_google, fetch_token_from_google_sdk,
 };
-use anyhow::Context;
+use anyhow::{Context, anyhow};
 use axum::Router;
 use axum::extract::Query;
 use axum::http::Response;
 use axum::response::{Html, IntoResponse};
 use axum::routing::get;
+use base64::Engine;
 use futures::future::BoxFuture;
 use futures::{FutureExt, TryFutureExt};
 use google_cloud_auth::credentials::Credentials;
 use itertools::Itertools;
+use rand::Rng;
+use sha2::Digest;
 use std::fmt::{Debug, Formatter};
 use std::io::IsTerminal;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::RwLock;
+use url::Url;
 
 /// Used to communicate the oauth code back to the axum webserver.
-type OAuthCallbackState = Arc<tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<String>>>>;
+type OAuthCallbackState =
+    Arc<tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<Result<String, CallbackError>>>>>;
 
 /// The response that comes back from google after the user has gone through the authorization flow
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -161,7 +166,23 @@ impl AuthorizedUser {
             oauth_callback_handler,
         )
         .await?;
-        let login_response: LoginResponse = response.json().await?;
+        let login_response_text = response.text().await?;
+        let login_response: LoginResponse = match serde_json::from_str(&login_response_text) {
+            Ok(login_response) => Ok(login_response),
+            Err(e) => {
+                match serde_json::from_str::<GoogleOAuthErrorResponse>(&login_response_text) {
+                    Ok(details) => Err(anyhow::anyhow!(
+                        "Error returned from google: {} {}",
+                        details.error,
+                        details.error_description
+                    )),
+                    Err(_) => {
+                        tracing::debug!("Auth response body: {}", login_response_text);
+                        Err(e).context("See debug logs for message body")
+                    }
+                }
+            }
+        }?;
 
         let new_adc = Self::adc(oauth_config, &login_response.refresh_token);
 
@@ -436,12 +457,14 @@ impl AuthorizedUser {
         oauth_callback_handler: OAuthCallback,
     ) -> anyhow::Result<reqwest::Response> {
         let scope = scopes.iter().map(AsRef::as_ref).join(" ");
+        let callback_state = generate_callback_state();
 
         // Create a channel for receiving the auth code
         let (tx, rx) = tokio::sync::oneshot::channel();
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let tx = Arc::new(tokio::sync::Mutex::new(Some(tx)));
 
+        let expected_state = callback_state.state.clone();
         // Set up the server
         let app =
             Router::new()
@@ -452,8 +475,13 @@ impl AuthorizedUser {
                               axum::extract::State(s): axum::extract::State<
                                   OAuthCallbackState,
                               >| async move {
+
                             if let Some(sender) = s.lock().await.take() {
-                                let _ = sender.send(q.code);
+                                if q.state != expected_state {
+                                    let _ = sender.send(Err(CallbackError::StateMismatch  { received_state: q.state, expected_state }));
+                                } else {
+                                    let _ = sender.send(Ok(q.code));
+                                }
                             }
                             oauth_callback_handler.call().await
                         },
@@ -462,8 +490,14 @@ impl AuthorizedUser {
                 .with_state(tx);
 
         // Start the server
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:8286").await?;
-        tracing::info!("Server listening on http://127.0.0.1:8286");
+        let (listener, listening_url) = bind_available_port(
+            &oauth_config.web.redirect_url,
+            oauth_config.web.redirect_port_range.0,
+            oauth_config.web.redirect_port_range.1,
+        )
+        .await?;
+
+        tracing::info!("Server listening on {}", listening_url);
 
         let _server_handle = tokio::spawn(async move {
             axum::serve(listener, app)
@@ -479,10 +513,13 @@ impl AuthorizedUser {
         let url_encoded_params = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("access_type", "offline")
             .append_pair("client_id", &oauth_config.web.client_id)
-            .append_pair("redirect_uri", &oauth_config.web.redirect_uris[0])
+            .append_pair("redirect_uri", &listening_url)
             .append_pair("response_type", "code")
             .append_pair("scope", &scope)
             .append_pair("prompt", "consent")
+            .append_pair("state", &callback_state.state)
+            .append_pair("code_challenge_method", "S256")
+            .append_pair("code_challenge", &callback_state.code_challenge)
             .finish();
 
         // Open the browser for authentication
@@ -509,7 +546,7 @@ impl AuthorizedUser {
         }
 
         // Wait for the auth code
-        let auth_code = rx.await.context("Failed to receive auth code")?;
+        let auth_code = rx.await.context("Failed to receive auth code")??;
 
         // Exchange the code for a token
         let client = reqwest::Client::new();
@@ -520,7 +557,8 @@ impl AuthorizedUser {
                 ("client_secret", &oauth_config.web.client_secret),
                 ("code", &auth_code),
                 ("grant_type", &"authorization_code".to_string()),
-                ("redirect_uri", &oauth_config.web.redirect_uris[0]),
+                ("redirect_uri", &listening_url),
+                ("code_verifier", &callback_state.code_verify),
             ])
             .send()
             .await
@@ -569,9 +607,94 @@ fn write_message_to_user(message: &str) {
     }
 }
 
+struct CallbackState {
+    state: String,
+    code_challenge: String,
+    code_verify: String,
+}
+
+#[derive(Debug, Clone, thiserror::Error)]
+enum CallbackError {
+    #[error("Got invalid state in callback. Expected {expected_state}, received {received_state}")]
+    StateMismatch {
+        expected_state: String,
+        received_state: String,
+    },
+}
+
+/// Generate the state, code_challenge and code_verify values
+fn generate_callback_state() -> CallbackState {
+    let code_verify: String = rand::thread_rng()
+        .sample_iter(rand::distributions::Alphanumeric)
+        .take(64)
+        .map(char::from)
+        .collect();
+
+    let digest = sha2::Sha256::digest(code_verify.as_bytes()).to_vec();
+    let code_challenge = base64::prelude::BASE64_URL_SAFE_NO_PAD.encode(digest);
+
+    let state: String = rand::thread_rng()
+        .sample_iter(rand::distributions::Alphanumeric)
+        .take(10)
+        .map(char::from)
+        .collect();
+    CallbackState {
+        state,
+        code_challenge,
+        code_verify,
+    }
+}
+
+/// Attempts to listen on a set of ports until it finds an available one.
+///
+/// Returns the listener, and the http url for the server.
+async fn bind_available_port(
+    callback_url: &str,
+    start_port: u16,
+    end_port: u16,
+) -> anyhow::Result<(tokio::net::TcpListener, String)> {
+    let hostname = Url::parse(&callback_url.replace("%port%", "80"))
+        .with_context(|| format!("Invalid callback url `{}` specified", callback_url))?
+        .host_str()
+        .ok_or_else(|| {
+            anyhow!(
+                "Invalid callback url `{}` specified. It must have a hostname",
+                callback_url
+            )
+        })?
+        .to_string();
+
+    for port in start_port..end_port {
+        let addr = format!("{hostname}:{port}");
+        let resolved_addr = std::net::ToSocketAddrs::to_socket_addrs(&addr)?
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("Could not resolve address {} to listen on", addr))?;
+
+        match tokio::net::TcpListener::bind(&resolved_addr).await {
+            Ok(l) => {
+                return Ok((l, callback_url.replace("%port%", &port.to_string())));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                tracing::debug!("Port {} on {} is unavailable: {}", port, hostname, e);
+            }
+            Err(e) => {
+                return Err(anyhow::Error::from(e))
+                    .with_context(|| format!("trying to bind to {}", addr));
+            }
+        }
+    }
+    Err(anyhow::anyhow!(
+        "Could not bind to {} on any port between [{}, {}). Please close any processes using those ports and try again.",
+        hostname,
+        start_port,
+        end_port
+    ))
+}
+
 #[derive(Debug, serde::Deserialize)]
 pub struct AuthResponse {
     pub code: String,
+    pub state: String,
 }
 
 #[async_trait::async_trait]

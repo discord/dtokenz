@@ -9,7 +9,6 @@ pub static CLOUD_SDK_CONFIG: LazyLock<OAuthConfig> = LazyLock::new(|| OAuthConfi
         client_secret: "ZmssLNjJy2998hD4CTg2ejr2".to_string(),
         auth_uri: "https://accounts.google.com/o/oauth2/auth".to_string(),
         token_uri: "https://oauth2.googleapis.com/token".to_string(),
-        redirect_uris: vec!["http://localhost:8286".to_owned()],
         default_scopes: vec![
             "openid".to_owned(),
             "https://www.googleapis.com/auth/userinfo.email".to_owned(),
@@ -19,6 +18,8 @@ pub static CLOUD_SDK_CONFIG: LazyLock<OAuthConfig> = LazyLock::new(|| OAuthConfi
             "https://www.googleapis.com/auth/compute".to_owned(),
             "https://www.googleapis.com/auth/accounts.reauth".to_owned(),
         ],
+        redirect_url: "http://localhost:%port%/".to_owned(),
+        redirect_port_range: (8085, 8185),
     },
 });
 
@@ -33,8 +34,19 @@ pub struct WebConfig {
     pub client_secret: String,
     pub auth_uri: String,
     pub token_uri: String,
-    pub redirect_uris: Vec<String>,
 
     #[serde(skip)]
     pub default_scopes: Vec<String>,
+    /// The URL that will be used for local oauth2 redirects, and determining which address to listen on
+    ///
+    /// This should be an HTTP/HTTPS url template string, where %port% will be replaced with the
+    /// port that was selected in the `callback_port_range`
+    ///
+    /// This will *generally* be `http://localhost:%port%/`, but may vary based on your oauth
+    /// configuration's allowed redirect urls. Note the trailing slash!
+    pub redirect_url: String,
+    /// The ports to attempt to listen on for the local oauth2 callback.
+    ///
+    /// This range is left-inclusive, and right-exclusive
+    pub redirect_port_range: (u16, u16),
 }
