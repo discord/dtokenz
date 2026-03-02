@@ -18,7 +18,7 @@ use base64::Engine;
 use futures::future::BoxFuture;
 use futures::{FutureExt, TryFutureExt};
 use google_cloud_auth::credentials::Credentials;
-use itertools::Itertools;
+use itertools::{Either, Itertools};
 use rand::Rng;
 use sha2::Digest;
 use std::fmt::{Debug, Formatter};
@@ -469,7 +469,32 @@ impl AuthorizedUser {
         }
 
         // Wait for the auth code
-        let auth_code = rx.await.context("Failed to receive auth code")??;
+        let sleep_duration = config.interactive_auth_timeout.unwrap_or(Duration::MAX);
+        let timeout_handle = tokio::time::sleep(sleep_duration);
+
+        let callback_result = tokio::select! {
+            _ = timeout_handle => {
+                Either::Left(sleep_duration)
+            },
+            res = rx => {
+                Either::Right(res)
+            }
+        };
+        let auth_code = match callback_result {
+            Either::Right(res) => res.context("Failed to receive auth code")??,
+            Either::Left(timeout) => {
+                // Shutdown of the webserver is handled by the scopeguard above.
+                write_message_to_user(&format!(
+                    "Authentication operation timed out after {} seconds",
+                    timeout.as_secs()
+                ));
+
+                return Err(anyhow::anyhow!(
+                    "Authentication timed out after {} seconds",
+                    timeout.as_secs()
+                ));
+            }
+        };
 
         // Exchange the code for a token
         let client = reqwest::Client::new();
