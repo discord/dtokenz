@@ -1,4 +1,5 @@
-use crate::authorized_user::{AuthorizedUser, OAuthCallback};
+use crate::authorized_user::AuthorizedUser;
+use crate::config::DtokenzConfig;
 use crate::metadata_service::MetadataService;
 use crate::oauth_config::OAuthConfig;
 use crate::service_account::ServiceAccount;
@@ -359,50 +360,15 @@ pub trait TokenSource: Send + Sync + std::fmt::Debug {
 ///
 /// oauth_config: The oauth application to authenticate against
 /// scopes: A list of scopes to request when fetching tokens
-/// interactive: If true, use the web flow if no other non-interactive token sources could be found
-/// interactive_auth_message: The message to print to users' consoles if interactive authentication
-///                           is required. The string `%url%` is replaced with the URL that
-///                           will be opened in a web browser. This is used to try to remove
-///                           the surprise when a browser pops up for users.
+/// config: How to handle interactive authentication
 pub async fn auto_detect(
     oauth_config: OAuthConfig,
     scopes: &[impl AsRef<str>],
-    interactive: bool,
-    interactive_auth_message: impl AsRef<str>,
+    config: DtokenzConfig,
 ) -> anyhow::Result<Box<dyn TokenSource + Send + Sync>> {
-    auto_detect_with_callback(
-        oauth_config,
-        scopes,
-        interactive,
-        interactive_auth_message,
-        crate::authorized_user::handle_oauth_callback,
-    )
-    .await
-}
-
-/// Like [`auto_detect`], but specify the HTTP callback to use after a successful authorization.
-///
-/// Users should prefer [`auto_detect`] / [`auto_detect_singleton`], unless a custom
-/// post-authentication page is desired.
-///
-/// The oauth_response_callback is generally just a function that takes no parameters, and
-/// returns a string, or something that can be converted into a [`axum::response::Response`].
-pub async fn auto_detect_with_callback(
-    oauth_config: OAuthConfig,
-    scopes: &[impl AsRef<str>],
-    interactive: bool,
-    interactive_auth_message: impl AsRef<str>,
-    oauth_response_callback: impl Into<OAuthCallback>,
-) -> anyhow::Result<Box<dyn TokenSource + Send + Sync>> {
-    let interactive_auth_message = interactive_auth_message.as_ref();
-    let oauth_response_callback = oauth_response_callback.into();
-    if let Some(client) = AuthorizedUser::new_unexpired_from_disk_with_callback(
-        &oauth_config,
-        scopes,
-        interactive_auth_message,
-        oauth_response_callback.clone(),
-    )
-    .await?
+    let config = Arc::new(config);
+    if let Some(client) =
+        AuthorizedUser::new_unexpired_from_disk(&oauth_config, scopes, config.clone()).await?
     {
         return Ok(Box::new(client));
     }
@@ -417,14 +383,7 @@ pub async fn auto_detect_with_callback(
         return Ok(Box::new(MetadataService::new(&oauth_config, scopes).await?));
     }
 
-    let client = AuthorizedUser::new_with_callback(
-        &oauth_config,
-        scopes,
-        interactive,
-        interactive_auth_message,
-        oauth_response_callback,
-    )
-    .await?;
+    let client = AuthorizedUser::new(&oauth_config, scopes, config).await?;
     Ok(Box::new(client))
 }
 
@@ -440,8 +399,7 @@ pub type SingletonClient = Arc<Box<dyn TokenSource>>;
 pub async fn auto_detect_singleton(
     oauth_config: OAuthConfig,
     scopes: &[impl AsRef<str>],
-    interactive: bool,
-    interactive_auth_message: impl AsRef<str>,
+    config: DtokenzConfig,
 ) -> anyhow::Result<SingletonClient> {
     use itertools::Itertools;
 
@@ -450,7 +408,7 @@ pub async fn auto_detect_singleton(
     let key = SingletonKey(
         oauth_config.web.client_id.clone(),
         scopes.iter().map(|s| s.as_ref()).sorted().join(" "),
-        interactive,
+        config.interactive,
     );
     static SINGLETON_MAP: LazyLock<RwLock<HashMap<SingletonKey, SingletonClient>>> =
         LazyLock::new(Default::default);
@@ -463,9 +421,7 @@ pub async fn auto_detect_singleton(
     match writer.entry(key) {
         Entry::Occupied(e) => Ok(e.get().clone()),
         Entry::Vacant(e) => Ok(e
-            .insert(Arc::new(
-                auto_detect(oauth_config, scopes, interactive, interactive_auth_message).await?,
-            ))
+            .insert(Arc::new(auto_detect(oauth_config, scopes, config).await?))
             .clone()),
     }
 }

@@ -1,6 +1,7 @@
 use crate::application_default_credentials::{
     ApplicationDefaultCredentials, AuthorizedUserDetails,
 };
+use crate::config::DtokenzConfig;
 use crate::oauth_config::OAuthConfig;
 use crate::state::PersistedState;
 use crate::token_source::{
@@ -97,12 +98,8 @@ pub struct AuthorizedUser {
     load_source: AuthorizedUserLoadSource,
     persist_on_fetch: bool,
     oauth_config: OAuthConfig,
-    // If non-empty, this message will be printed to stderr immediately before
-    // initiating a web-based oauth flow. The literal sequence '%url%' will be
-    // replaced with the URL to be opened.
-    interactive_auth_message: String,
+    config: Arc<DtokenzConfig>,
     inner: Arc<RwLock<AuthorizedUserState>>,
-    callback: OAuthCallback,
 }
 
 impl Debug for AuthorizedUser {
@@ -156,16 +153,9 @@ impl AuthorizedUser {
         oauth_config: &OAuthConfig,
         scopes: &[impl AsRef<str>],
         persist_on_fetch: bool,
-        interactive_auth_message: impl AsRef<str>,
-        oauth_callback_handler: OAuthCallback,
+        config: Arc<DtokenzConfig>,
     ) -> anyhow::Result<AuthorizedUserState> {
-        let response = Self::web_flow(
-            oauth_config,
-            scopes,
-            interactive_auth_message,
-            oauth_callback_handler,
-        )
-        .await?;
+        let response = Self::web_flow(oauth_config, scopes, config).await?;
         let login_response_text = response.text().await?;
         let login_response: LoginResponse = match serde_json::from_str(&login_response_text) {
             Ok(login_response) => Ok(login_response),
@@ -206,8 +196,7 @@ impl AuthorizedUser {
     async fn new_from_adc_json(
         oauth_config: &OAuthConfig,
         scopes: &[impl AsRef<str>],
-        interactive_auth_message: impl AsRef<str>,
-        oauth_callback_handler: OAuthCallback,
+        config: Arc<DtokenzConfig>,
     ) -> anyhow::Result<Option<(Self, SystemTime)>> {
         let ret =
             match ApplicationDefaultCredentials::load_from_file(Some(&oauth_config.web.client_id))?
@@ -218,11 +207,10 @@ impl AuthorizedUser {
                     let credentials = Self::create_credentials(&state).await?;
                     Some((
                         Self {
-                            callback: oauth_callback_handler,
                             load_source: AuthorizedUserLoadSource::ADCJson,
                             persist_on_fetch: false,
                             oauth_config: oauth_config.clone(),
-                            interactive_auth_message: interactive_auth_message.as_ref().to_string(),
+                            config,
                             inner: Arc::new(RwLock::new(AuthorizedUserState {
                                 credentials,
                                 state,
@@ -239,8 +227,7 @@ impl AuthorizedUser {
     async fn new_from_persisted_state(
         oauth_config: &OAuthConfig,
         scopes: &[impl AsRef<str>],
-        interactive_auth_message: impl AsRef<str>,
-        oauth_callback_handler: OAuthCallback,
+        config: Arc<DtokenzConfig>,
     ) -> anyhow::Result<Option<(Self, SystemTime)>> {
         let ret = match PersistedState::load(oauth_config, scopes)? {
             Some((
@@ -254,11 +241,10 @@ impl AuthorizedUser {
 
                 Some((
                     Self {
-                        callback: oauth_callback_handler,
                         load_source: AuthorizedUserLoadSource::StateFile,
                         persist_on_fetch: false,
                         oauth_config: oauth_config.clone(),
-                        interactive_auth_message: interactive_auth_message.as_ref().to_string(),
+                        config,
                         inner: Arc::new(RwLock::new(AuthorizedUserState { credentials, state })),
                     },
                     state_mtime,
@@ -308,38 +294,12 @@ impl AuthorizedUser {
     pub async fn new_unexpired_from_disk(
         oauth_config: &OAuthConfig,
         scopes: &[impl AsRef<str>],
-        interactive_auth_message: impl AsRef<str>,
+        config: Arc<DtokenzConfig>,
     ) -> anyhow::Result<Option<Self>> {
-        Self::new_unexpired_from_disk_with_callback(
-            oauth_config,
-            scopes,
-            interactive_auth_message,
-            handle_oauth_callback.into(),
-        )
-        .await
-    }
-
-    pub async fn new_unexpired_from_disk_with_callback(
-        oauth_config: &OAuthConfig,
-        scopes: &[impl AsRef<str>],
-        interactive_auth_message: impl AsRef<str>,
-        oauth_callback_handler: OAuthCallback,
-    ) -> anyhow::Result<Option<Self>> {
-        let interactive_auth_message = interactive_auth_message.as_ref();
-        let maybe_persisted_client = Self::new_from_persisted_state(
-            oauth_config,
-            scopes,
-            interactive_auth_message,
-            oauth_callback_handler.clone(),
-        )
-        .await?;
-        let maybe_adc_client = Self::new_from_adc_json(
-            oauth_config,
-            scopes,
-            interactive_auth_message,
-            oauth_callback_handler.clone(),
-        )
-        .await?;
+        let maybe_persisted_client =
+            Self::new_from_persisted_state(oauth_config, scopes, config.clone()).await?;
+        let maybe_adc_client =
+            Self::new_from_adc_json(oauth_config, scopes, config.clone()).await?;
         let clients = Self::order_clients_by_mtime(maybe_persisted_client, maybe_adc_client);
 
         for mut client in clients {
@@ -391,52 +351,17 @@ impl AuthorizedUser {
     pub async fn new(
         oauth_config: &OAuthConfig,
         scopes: &[impl AsRef<str>],
-        interactive: bool,
-        interactive_auth_message: impl AsRef<str>,
+        config: Arc<DtokenzConfig>,
     ) -> anyhow::Result<Self> {
-        Self::new_with_callback(
-            oauth_config,
-            scopes,
-            interactive,
-            interactive_auth_message,
-            handle_oauth_callback.into(),
-        )
-        .await
-    }
-
-    pub async fn new_with_callback(
-        oauth_config: &OAuthConfig,
-        scopes: &[impl AsRef<str>],
-        interactive: bool,
-        interactive_auth_message: impl AsRef<str>,
-        oauth_callback_handler: OAuthCallback,
-    ) -> anyhow::Result<Self> {
-        let interactive_auth_message = interactive_auth_message.as_ref();
-
-        match Self::new_unexpired_from_disk_with_callback(
-            oauth_config,
-            scopes,
-            interactive_auth_message,
-            oauth_callback_handler.clone(),
-        )
-        .await?
-        {
+        match Self::new_unexpired_from_disk(oauth_config, scopes, config.clone()).await? {
             Some(client) => Ok(client),
-            None if interactive => {
-                let inner = Self::new_from_web(
-                    oauth_config,
-                    scopes,
-                    true,
-                    interactive_auth_message,
-                    oauth_callback_handler.clone(),
-                )
-                .await?;
+            None if config.interactive => {
+                let inner = Self::new_from_web(oauth_config, scopes, true, config.clone()).await?;
                 Ok(Self {
-                    callback: oauth_callback_handler,
                     load_source: AuthorizedUserLoadSource::WebAuthFlow,
                     persist_on_fetch: true,
                     oauth_config: oauth_config.clone(),
-                    interactive_auth_message: interactive_auth_message.to_string(),
+                    config,
                     inner: Arc::new(RwLock::new(inner)),
                 })
             }
@@ -453,8 +378,7 @@ impl AuthorizedUser {
     async fn web_flow(
         oauth_config: &OAuthConfig,
         scopes: &[impl AsRef<str>],
-        interactive_auth_message: impl AsRef<str>,
-        oauth_callback_handler: OAuthCallback,
+        config: Arc<DtokenzConfig>,
     ) -> anyhow::Result<reqwest::Response> {
         let scope = scopes.iter().map(AsRef::as_ref).join(" ");
         let callback_state = generate_callback_state();
@@ -464,6 +388,7 @@ impl AuthorizedUser {
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let tx = Arc::new(tokio::sync::Mutex::new(Some(tx)));
 
+        let cloned_config = config.clone();
         let expected_state = callback_state.state.clone();
         // Set up the server
         let app =
@@ -483,7 +408,7 @@ impl AuthorizedUser {
                                     let _ = sender.send(Ok(q.code));
                                 }
                             }
-                            oauth_callback_handler.call().await
+                            cloned_config.oauth_callback_handler.call().await
                         },
                     ),
                 )
@@ -528,10 +453,8 @@ impl AuthorizedUser {
         tracing::info!("Request URL: {}", auth_url);
 
         // Print custom message to stderr if provided
-        let interactive_auth_message = interactive_auth_message.as_ref();
-        if !interactive_auth_message.is_empty() {
-            let auth_message_with_url_interpolated =
-                interactive_auth_message.replace("%url%", &auth_url);
+        if let Some(message) = &config.interactive_auth_message {
+            let auth_message_with_url_interpolated = message.replace("%url%", &auth_url);
             write_message_to_user(&auth_message_with_url_interpolated);
             // sleep for a bit so the message can be seen before a browser pops
             // up.
@@ -568,7 +491,7 @@ impl AuthorizedUser {
     }
 }
 
-pub(crate) async fn handle_oauth_callback() -> Html<&'static str> {
+pub async fn default_oauth_callback_handler() -> Html<&'static str> {
     // Return a success page
     Html(
         r#"
@@ -738,8 +661,7 @@ impl TokenSource for AuthorizedUser {
             &self.oauth_config,
             &writer.state.scopes,
             self.persist_on_fetch,
-            self.interactive_auth_message.clone(),
-            self.callback.clone(),
+            self.config.clone(),
         )
         .await?;
         *writer = new_inner;

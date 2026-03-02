@@ -38,6 +38,7 @@
 
 pub mod application_default_credentials;
 pub mod authorized_user;
+pub mod config;
 pub mod metadata_service;
 pub mod oauth_config;
 pub mod service_account;
@@ -45,6 +46,7 @@ mod state;
 pub mod token_source;
 
 pub use authorized_user::AuthorizedUser;
+pub use config::DtokenzConfig;
 pub use metadata_service::MetadataService;
 pub use oauth_config::CLOUD_SDK_CONFIG;
 pub use oauth_config::OAuthConfig;
@@ -52,4 +54,3 @@ pub use service_account::ServiceAccount;
 pub use token_source::TokenSource;
 pub use token_source::auto_detect;
 pub use token_source::auto_detect_singleton;
-pub use token_source::auto_detect_with_callback;
