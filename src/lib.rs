@@ -15,15 +15,18 @@
 //! ## Example
 //!
 //!```rust,no_run
-//! use dtokenz::{TokenSource, CLOUD_SDK_CONFIG, auto_detect_singleton};
+//! use dtokenz::{TokenSource, CLOUD_SDK_CONFIG, auto_detect_singleton, DtokenzConfig};
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
 //!     let interactive_auth_message = "Opening browser to %url%";
 //!     let token_source = auto_detect_singleton(
-//!            CLOUD_SDK_CONFIG.clone(),
-//!            &CLOUD_SDK_CONFIG.web.default_scopes,
-//!            true,
-//!            interactive_auth_message,
+//!         CLOUD_SDK_CONFIG.clone(),
+//!         &CLOUD_SDK_CONFIG.web.default_scopes,
+//!         DtokenzConfig {
+//!            interactive: true,
+//!            interactive_auth_message: Some(interactive_auth_message.to_owned()),
+//!            ..DtokenzConfig::default()
+//!         }
 //!     ).await?;
 //!     let access_token = token_source.get_access_token().await?;
 //!     let id_token = token_source.get_id_token().await?;
