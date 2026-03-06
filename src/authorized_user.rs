@@ -469,12 +469,11 @@ impl AuthorizedUser {
         }
 
         // Wait for the auth code
-        let sleep_duration = config.interactive_auth_timeout.unwrap_or(Duration::MAX);
-        let timeout_handle = tokio::time::sleep(sleep_duration);
+        let timeout_handle = tokio::time::sleep(config.interactive_auth_timeout);
 
         let callback_result = tokio::select! {
             _ = timeout_handle => {
-                Either::Left(sleep_duration)
+                Either::Left(config.interactive_auth_timeout)
             },
             res = rx => {
                 Either::Right(res)

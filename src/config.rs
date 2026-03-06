@@ -21,8 +21,8 @@ pub struct DtokenzConfig {
     pub oauth_callback_handler: OAuthCallback,
     /// How long to wait for a user to complete the interactive authentication flow before aborting.
     ///
-    /// If `None`, wait indefinitely. Defaults to 2 minutes.
-    pub interactive_auth_timeout: Option<std::time::Duration>,
+    /// Defaults to 2 minutes.
+    pub interactive_auth_timeout: std::time::Duration,
 }
 
 impl Default for DtokenzConfig {
@@ -31,7 +31,7 @@ impl Default for DtokenzConfig {
             interactive: true,
             interactive_auth_message: None,
             oauth_callback_handler: crate::authorized_user::default_oauth_callback_handler.into(),
-            interactive_auth_timeout: Some(std::time::Duration::from_mins(2)),
+            interactive_auth_timeout: std::time::Duration::from_mins(2),
         }
     }
 }
