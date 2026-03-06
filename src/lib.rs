@@ -15,15 +15,18 @@
 //! ## Example
 //!
 //!```rust,no_run
-//! use dtokenz::{TokenSource, CLOUD_SDK_CONFIG, auto_detect_singleton};
+//! use dtokenz::{TokenSource, CLOUD_SDK_CONFIG, auto_detect_singleton, DtokenzConfig};
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
 //!     let interactive_auth_message = "Opening browser to %url%";
 //!     let token_source = auto_detect_singleton(
-//!            CLOUD_SDK_CONFIG.clone(),
-//!            &CLOUD_SDK_CONFIG.web.default_scopes,
-//!            true,
-//!            interactive_auth_message,
+//!         CLOUD_SDK_CONFIG.clone(),
+//!         &CLOUD_SDK_CONFIG.web.default_scopes,
+//!         DtokenzConfig {
+//!            interactive: true,
+//!            interactive_auth_message: Some(interactive_auth_message.to_owned()),
+//!            ..DtokenzConfig::default()
+//!         }
 //!     ).await?;
 //!     let access_token = token_source.get_access_token().await?;
 //!     let id_token = token_source.get_id_token().await?;
@@ -38,6 +41,7 @@
 
 pub mod application_default_credentials;
 pub mod authorized_user;
+pub mod config;
 pub mod metadata_service;
 pub mod oauth_config;
 pub mod service_account;
@@ -45,6 +49,7 @@ mod state;
 pub mod token_source;
 
 pub use authorized_user::AuthorizedUser;
+pub use config::DtokenzConfig;
 pub use metadata_service::MetadataService;
 pub use oauth_config::CLOUD_SDK_CONFIG;
 pub use oauth_config::OAuthConfig;
@@ -52,4 +57,3 @@ pub use service_account::ServiceAccount;
 pub use token_source::TokenSource;
 pub use token_source::auto_detect;
 pub use token_source::auto_detect_singleton;
-pub use token_source::auto_detect_with_callback;
