@@ -79,6 +79,8 @@ async fn decode_id_token(data: &str) -> anyhow::Result<Claims> {
 pub enum AccessTokenError {
     #[error("Credentials appear to be expired")]
     RefreshTokenExpired(#[source] google_cloud_auth::errors::CredentialsError),
+    #[error("Workload identity federation token exchange failed")]
+    TokenExchangeFailed(#[source] google_cloud_auth::errors::CredentialsError),
     #[error(transparent)]
     GoogleAuthError(google_cloud_auth::errors::CredentialsError),
     #[error("Received Not Modified from the Google SDK, but an etag was not sent")]
@@ -123,8 +125,7 @@ pub async fn fetch_token_from_google_sdk(
     Ok(Token::from_access_token(token).await?)
 }
 
-/// Like [`fetch_token_from_google_sdk`], but return the bare access token string without
-/// looking up its expiry.
+/// Like [`fetch_token_from_google_sdk`], but without looking up the token's expiry.
 pub(crate) async fn fetch_raw_token_from_google_sdk(
     credentials: Credentials,
 ) -> Result<String, AccessTokenError> {
@@ -352,9 +353,8 @@ pub trait TokenSource: Send + Sync + std::fmt::Debug {
 /// The more detailed heuristic is:
 /// - Attempt to load authorized user credentials from disk. If they are present and NOT EXPIRED
 ///   then return that authorized user.
-/// - Attempt to load external account json from GOOGLE_APPLICATION_CREDENTIALS or
-///   application_default_credentials.json. If the file exists and is an `external_account`,
-///   an [`ExternalAccount`] client will be returned. See its docs for how ID tokens work.
+/// - If the application default credentials file is an `external_account`, return an
+///   [`ExternalAccount`] client.
 /// - Attempt to load service account json from GOOGLE_APPLICATION_CREDENTIALS or
 ///   application_default_credentials.json (in ~/.config/gcloud/application_default_credentials.json).
 ///   If the json file exists and has the right account type in it, then a service account client

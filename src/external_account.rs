@@ -10,45 +10,31 @@ use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// Environment variable naming the service account that ID tokens are minted as when the
-/// external account credential file has no `service_account_impersonation_url`.
-///
-/// The federated principal must hold `roles/iam.serviceAccountOpenIdTokenCreator` on it. Access
-/// tokens are unaffected: they stay the federated principal's own.
+/// Service account to mint ID tokens as when the credential file has no
+/// `service_account_impersonation_url`. The federated principal needs
+/// `roles/iam.serviceAccountOpenIdTokenCreator` on it.
 pub const ID_TOKEN_SERVICE_ACCOUNT_ENV: &str = "DTOKENZ_ID_TOKEN_SERVICE_ACCOUNT";
 
 const IAM_CREDENTIALS_URL: &str = "https://iamcredentials.googleapis.com";
 const CLOUD_PLATFORM_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
 
-/// If Google's tokeninfo endpoint will not describe a federated access token, assume this much
-/// validity. STS issues one-hour tokens and the Google SDK refreshes them well before expiry, so
-/// a token it hands us has at least this long left.
+/// Assumed validity when tokeninfo will not describe a federated access token.
 const FALLBACK_ACCESS_TOKEN_VALIDITY: chrono::Duration = chrono::Duration::minutes(30);
 
 pub struct ExternalAccountInner {
-    /// Credentials for access tokens. If the file has `service_account_impersonation_url`, these
-    /// impersonate; otherwise they are the federated principal.
+    /// Access-token credentials; impersonating if the file names a service account.
     credentials: Credentials,
-    /// Always the federated principal, used to call `generateIdToken`.
+    /// The federated principal, used to call `generateIdToken`.
     federated_credentials: Credentials,
     scopes: Vec<String>,
 }
 
-/// A token source for an [external account] credential file, i.e. Workload Identity Federation.
+/// Token source for an `external_account` credential file (Workload Identity Federation).
 ///
-/// Access tokens come from the Security Token Service via the Google SDK, exactly as for gcloud,
-/// Go or Python. ID tokens need one extra step, because Google only signs ID tokens for users and
-/// service accounts, never for a federated principal: dtokenz calls `generateIdToken` on a service
-/// account using the federated access token. The account is
-///
-/// 1. the one in `service_account_impersonation_url`, if the file has it (then the Google SDK
-///    impersonates it for access tokens too), otherwise
-/// 2. the one named by [`ID_TOKEN_SERVICE_ACCOUNT_ENV`].
-///
-/// Either way the federated principal needs `roles/iam.serviceAccountOpenIdTokenCreator` on that
-/// account. With neither configured, [`TokenSource::get_id_token`] fails with an error saying so.
-///
-/// [external account]: https://google.aip.dev/auth/4117
+/// Access tokens come from the Security Token Service via the Google SDK. Google does not issue
+/// ID tokens for federated principals, so those are minted with `generateIdToken` on the service
+/// account in `service_account_impersonation_url`, or the one named by
+/// [`ID_TOKEN_SERVICE_ACCOUNT_ENV`] when the file has none.
 pub struct ExternalAccount {
     oauth_config: OAuthConfig,
     adc: ExternalAccountDetails,
@@ -57,10 +43,7 @@ pub struct ExternalAccount {
 }
 
 impl ExternalAccount {
-    /// Attempt to instantiate a client for an external account credential file.
-    ///
-    /// This looks at either GOOGLE_APPLICATION_CREDENTIALS or the default ADC json path for an
-    /// `external_account` document. If none is found, `Ok(None)` is returned.
+    /// Returns `Ok(None)` unless the application default credentials file is an `external_account`.
     pub async fn new(
         oauth_config: &OAuthConfig,
         scopes: &[impl AsRef<str>],
@@ -121,6 +104,17 @@ impl Debug for ExternalAccount {
     }
 }
 
+/// Fetch an access token, reporting a failed STS exchange as such rather than as expired
+/// credentials. Rebuilding the credentials would not change the outcome, so no retry.
+async fn fetch_federated_token(credentials: Credentials) -> Result<String, AccessTokenError> {
+    fetch_raw_token_from_google_sdk(credentials)
+        .await
+        .map_err(|e| match e {
+            AccessTokenError::RefreshTokenExpired(e) => AccessTokenError::TokenExchangeFailed(e),
+            other => other,
+        })
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GenerateIdTokenRequest<'a> {
@@ -146,10 +140,8 @@ struct GoogleApiError {
     status: String,
 }
 
-/// Call `iamcredentials.generateIdToken` on `service_account` as the holder of `bearer`.
-///
-/// Returns the raw JWT. `base_url` is the IAM Credentials API root; it is a parameter so tests
-/// can point it at a local server.
+/// POST `iamcredentials.generateIdToken` and return the raw JWT. `base_url` is a parameter so
+/// tests can point it at a local server.
 async fn generate_id_token(
     base_url: &str,
     service_account: &str,
@@ -220,12 +212,12 @@ impl TokenSource for ExternalAccount {
     }
 
     async fn get_access_token_impl(&self) -> Result<Token, AccessTokenError> {
-        let token = fetch_raw_token_from_google_sdk(self.credentials().await).await?;
+        let token = fetch_federated_token(self.credentials().await).await?;
         match Token::from_access_token(token.clone()).await {
             Ok(t) => Ok(t),
             Err(e) => {
-                // tokeninfo describes impersonated and user tokens, but may decline a federated
-                // STS token. The token is still perfectly usable; only its expiry is unknown.
+                // tokeninfo may decline a federated STS token; it is still valid, only its
+                // expiry is unknown.
                 tracing::debug!(
                     "tokeninfo did not describe the federated access token ({e}); assuming {} of validity",
                     FALLBACK_ACCESS_TOKEN_VALIDITY
@@ -247,14 +239,11 @@ impl TokenSource for ExternalAccount {
             )));
         };
         let federated = self.inner.read().await.federated_credentials.clone();
-        let bearer = fetch_raw_token_from_google_sdk(federated)
-            .await
-            .map_err(|e| {
-                IdTokenError::Anyhow(
-                    anyhow::anyhow!(e)
-                        .context("fetching a federated access token to call generateIdToken with"),
-                )
-            })?;
+        let bearer = fetch_federated_token(federated).await.map_err(|e| {
+            IdTokenError::Anyhow(
+                anyhow::anyhow!(e).context("fetching a federated access token for generateIdToken"),
+            )
+        })?;
         let jwt = generate_id_token(
             IAM_CREDENTIALS_URL,
             service_account,

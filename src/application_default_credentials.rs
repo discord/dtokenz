@@ -31,39 +31,26 @@ pub struct ServiceAccountDetails {
     pub universe_domain: Option<String>,
 }
 
-/// An [external account] credential file, as written by
-/// `gcloud iam workload-identity-pools create-cred-config` or by hand.
-///
-/// Only the fields dtokenz itself inspects are named; everything else (`client_id`,
-/// `universe_domain`, `service_account_impersonation`, ...) is kept verbatim in `extra`
-/// so the whole document can be handed to the Google SDK unchanged.
-///
-/// [external account]: https://google.aip.dev/auth/4117
+/// An `external_account` credential file. Only the fields dtokenz reads are named; the rest
+/// is kept in `extra` so the document reaches the Google SDK unchanged.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct ExternalAccountDetails {
-    /// The workload identity pool provider, e.g.
-    /// `//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/p/providers/q`.
+    /// The workload identity pool provider resource name.
     pub audience: String,
-    /// The type of the subject token, e.g. `urn:ietf:params:oauth:token-type:jwt`.
     pub subject_token_type: String,
-    /// The Security Token Service endpoint.
     pub token_url: String,
-    /// When set, the Google SDK impersonates this service account for *every* access token,
-    /// and dtokenz mints ID tokens as it. When unset, access tokens belong to the federated
-    /// principal itself; see [`crate::ExternalAccount`] for how ID tokens are handled then.
+    /// When set, every access token impersonates this service account and ID tokens are
+    /// minted as it. See [`crate::ExternalAccount`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_account_impersonation_url: Option<String>,
-    /// Where the subject token comes from (`file`, `url` or `executable`). Passed through.
     pub credential_source: serde_json::Value,
-    /// Any other fields in the file, preserved verbatim.
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl ExternalAccountDetails {
-    /// The whole credential document, including the `type` tag, in the shape the Google SDK's
-    /// [`google_cloud_auth::credentials::external_account::Builder`] expects.
+    /// The full credential document, including the `type` tag.
     pub fn to_json(&self) -> serde_json::Value {
         let mut value = serde_json::json!({ "type": "external_account" });
         if let (Some(target), Ok(serde_json::Value::Object(fields))) =
@@ -74,8 +61,7 @@ impl ExternalAccountDetails {
         value
     }
 
-    /// Like [`Self::to_json`], but without `service_account_impersonation_url`, so the
-    /// resulting credentials are the federated principal rather than an impersonated account.
+    /// [`Self::to_json`] without `service_account_impersonation_url`: the federated principal.
     pub fn to_json_without_impersonation(&self) -> serde_json::Value {
         let mut value = self.to_json();
         if let Some(fields) = value.as_object_mut() {
@@ -84,10 +70,7 @@ impl ExternalAccountDetails {
         value
     }
 
-    /// The service account named by `service_account_impersonation_url`, if any.
-    ///
-    /// The URL has the shape
-    /// `https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/<email>:generateAccessToken`.
+    /// The service account email in `service_account_impersonation_url`, if any.
     pub fn impersonated_service_account(&self) -> Option<String> {
         let url = self.service_account_impersonation_url.as_deref()?;
         let (_, rest) = url.split_once("/serviceAccounts/")?;
