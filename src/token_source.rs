@@ -1,5 +1,6 @@
 use crate::authorized_user::AuthorizedUser;
 use crate::config::DtokenzConfig;
+use crate::external_account::ExternalAccount;
 use crate::metadata_service::MetadataService;
 use crate::oauth_config::OAuthConfig;
 use crate::service_account::ServiceAccount;
@@ -78,6 +79,8 @@ async fn decode_id_token(data: &str) -> anyhow::Result<Claims> {
 pub enum AccessTokenError {
     #[error("Credentials appear to be expired")]
     RefreshTokenExpired(#[source] google_cloud_auth::errors::CredentialsError),
+    #[error("Workload identity federation token exchange failed")]
+    TokenExchangeFailed(#[source] google_cloud_auth::errors::CredentialsError),
     #[error(transparent)]
     GoogleAuthError(google_cloud_auth::errors::CredentialsError),
     #[error("Received Not Modified from the Google SDK, but an etag was not sent")]
@@ -118,20 +121,25 @@ pub enum IdTokenError {
 pub async fn fetch_token_from_google_sdk(
     credentials: Credentials,
 ) -> Result<Token, AccessTokenError> {
+    let token = fetch_raw_token_from_google_sdk(credentials).await?;
+    Ok(Token::from_access_token(token).await?)
+}
+
+/// Like [`fetch_token_from_google_sdk`], but without looking up the token's expiry.
+pub(crate) async fn fetch_raw_token_from_google_sdk(
+    credentials: Credentials,
+) -> Result<String, AccessTokenError> {
     match credentials.headers(Default::default()).await {
         Ok(headers) => match headers {
             CacheableResource::NotModified => Err(AccessTokenError::InvalidNotModified),
-            CacheableResource::New { data, .. } => {
-                let token = data
-                    .get("authorization")
-                    .ok_or(AccessTokenError::NoAuthorizationHeader)?
-                    .to_str()
-                    .map_err(|_| AccessTokenError::NoAuthorizationHeader)?
-                    .strip_prefix("Bearer ")
-                    .ok_or(AccessTokenError::NonBearerHeader)?
-                    .to_string();
-                Ok(Token::from_access_token(token).await?)
-            }
+            CacheableResource::New { data, .. } => Ok(data
+                .get("authorization")
+                .ok_or(AccessTokenError::NoAuthorizationHeader)?
+                .to_str()
+                .map_err(|_| AccessTokenError::NoAuthorizationHeader)?
+                .strip_prefix("Bearer ")
+                .ok_or(AccessTokenError::NonBearerHeader)?
+                .to_string()),
         },
         // We can't access the message directly, and the display impl for CredentialsError
         // doesn't give us the most helpful message. For now, assume we're not logged in
@@ -213,7 +221,7 @@ impl Token {
     /// Given an opaque access token from Google, attempt to parse out and validate useful info
     ///
     /// Note: This method may access the network.
-    async fn from_access_token(t: impl Into<String>) -> anyhow::Result<Token> {
+    pub(crate) async fn from_access_token(t: impl Into<String>) -> anyhow::Result<Token> {
         let token = t.into();
         // The ServiceAccount type returns a self-signed JWT from the Google SDK's header() / access
         // token method. The tokeninfo endpoint doesn't like getting this JWT as an access token
@@ -337,6 +345,7 @@ pub trait TokenSource: Send + Sync + std::fmt::Debug {
 ///
 /// tl;dr; This is the preference order of token sources if they exist:
 /// - Non-expired Authorized User credentials
+/// - External account (workload identity federation) application default credentials
 /// - Service account application default credentials
 /// - Metadata service
 /// - Authorized User credentials, created / refreshed potentially interactively.
@@ -344,6 +353,8 @@ pub trait TokenSource: Send + Sync + std::fmt::Debug {
 /// The more detailed heuristic is:
 /// - Attempt to load authorized user credentials from disk. If they are present and NOT EXPIRED
 ///   then return that authorized user.
+/// - If the application default credentials file is an `external_account`, return an
+///   [`ExternalAccount`] client.
 /// - Attempt to load service account json from GOOGLE_APPLICATION_CREDENTIALS or
 ///   application_default_credentials.json (in ~/.config/gcloud/application_default_credentials.json).
 ///   If the json file exists and has the right account type in it, then a service account client
@@ -370,6 +381,10 @@ pub async fn auto_detect(
     if let Some(client) =
         AuthorizedUser::new_unexpired_from_disk(&oauth_config, scopes, config.clone()).await?
     {
+        return Ok(Box::new(client));
+    }
+
+    if let Some(client) = ExternalAccount::new(&oauth_config, scopes).await? {
         return Ok(Box::new(client));
     }
 

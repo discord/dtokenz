@@ -38,7 +38,8 @@ impl ServiceAccount {
         let maybe_adc = ApplicationDefaultCredentials::load_from_file(None)?;
         let adc = match maybe_adc {
             None => return Ok(None),
-            Some((ApplicationDefaultCredentials::AuthorizedUser(_), _)) => return Ok(None),
+            Some((ApplicationDefaultCredentials::AuthorizedUser(_), _))
+            | Some((ApplicationDefaultCredentials::ExternalAccount(_), _)) => return Ok(None),
             Some((ApplicationDefaultCredentials::ServiceAccount(sa), _)) => sa,
         };
         let jwt_key = jsonwebtoken::EncodingKey::from_rsa_pem(adc.private_key.as_bytes())?;

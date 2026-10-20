@@ -8,6 +8,8 @@
 //! - Authorized Users (individuals in a GCP organization)
 //! - Service Accounts via private key
 //! - Service Accounts via Google Metadata Service for hosts running in GCP.
+//! - External accounts (Workload Identity Federation), optionally minting ID tokens through a
+//!   service account; see [`ExternalAccount`].
 //!
 //! The main entry point to this library is the [`auto_detect`]/[`auto_detect_singleton`] method. See its documentation for more details about how `dtokenz` decides to authenticate.
 //! The only configuration needed is an instance of [`oauth_config::OAuthConfig`]
@@ -42,6 +44,7 @@
 pub mod application_default_credentials;
 pub mod authorized_user;
 pub mod config;
+pub mod external_account;
 pub mod metadata_service;
 pub mod oauth_config;
 pub mod service_account;
@@ -50,6 +53,7 @@ pub mod token_source;
 
 pub use authorized_user::AuthorizedUser;
 pub use config::DtokenzConfig;
+pub use external_account::ExternalAccount;
 pub use metadata_service::MetadataService;
 pub use oauth_config::CLOUD_SDK_CONFIG;
 pub use oauth_config::OAuthConfig;

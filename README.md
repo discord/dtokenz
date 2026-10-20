@@ -11,12 +11,14 @@ This library supports fetching both [access tokens](https://docs.cloud.google.co
 - Authorized Users (individuals in a GCP organization)
 - Service Accounts via private key
 - Service Accounts via Google Metadata Service for hosts running in GCP.
+- External accounts ([Workload Identity Federation](https://cloud.google.com/iam/docs/workload-identity-federation)), e.g. CI jobs federating a Buildkite or GitHub OIDC token.
 
 The main entry point to this library is the `auto_detect`/`auto_detect_singleton` method. The only configuration needed is an instance of `OauthConfig`. By default we provide the Google SDK one.
 
 Very roughly, this method tries to figure out the least obtrusive way to fetch a token possible. The order it tries is:
 
 - Non-expired Authorized User credentials
+- External account application default credentials
 - Service account application default credentials
 - The GCP Metadata service
 - Authorized User credentials, created / refreshed potentially interactively.
@@ -24,6 +26,7 @@ Very roughly, this method tries to figure out the least obtrusive way to fetch a
 The more detailed heuristic is:
 
 - Attempt to load authorized user credentials from disk. If they are present and NOT EXPIRED then return that authorized user.
+- If the file is an `external_account`, return an `ExternalAccount` client. Access tokens come from the Security Token Service. ID tokens are minted with `generateIdToken` on the service account in `service_account_impersonation_url`, or the one in `DTOKENZ_ID_TOKEN_SERVICE_ACCOUNT` if the file has none; the federated principal needs `roles/iam.serviceAccountOpenIdTokenCreator` on it.
 - Attempt to load service account json from GOOGLE_APPLICATION_CREDENTIALS or application_default_credentials.json (in ~/.config/gcloud/application_default_credentials.json). If the json file exists and has the right account type in it, then a service account client will be returned.
 - If GOOGLE_APPLICATION_CREDENTIALS is not set, attempt to see if there is a metadata service, and use that if possible. This will prefer service accounts on e.g. GCP hosts, so if a specific authorized user account is needed, do not use this method.
 - If after all of that, we still don't have a client, attempt to get an authorized user client. If `interactive` is true, then if no credentials are already configured, the web flow will be initialized. If `interactive` is false, an error will be returned. See `AuthorizedUser` for more details about how interactive authentication works.
